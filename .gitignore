@@ -1,1 +1,6 @@
 parser
+.idea/
+.vscode/
+*.iml
+outages.db
+go.sum
