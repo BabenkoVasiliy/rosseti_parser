@@ -58,13 +58,18 @@ func parseSettlements(env string) ([]Settlement, error) {
 	return result, nil
 }
 
+func matchField(record, settlement string) bool {
+	a, b := strings.ToLower(record), strings.ToLower(settlement)
+	return strings.Contains(a, b) || strings.Contains(b, a)
+}
+
 func filterBySettlements(records []rosseti.ShutdownRecord, settlements []Settlement) []rosseti.ShutdownRecord {
 	var result []rosseti.ShutdownRecord
 	for _, r := range records {
 		for _, s := range settlements {
 			if r.Region == s.Region &&
-				strings.Contains(strings.ToLower(r.Raion), strings.ToLower(s.Raion)) &&
-				strings.Contains(strings.ToLower(r.Gorod), strings.ToLower(s.Gorod)) {
+				matchField(r.Raion, s.Raion) &&
+				matchField(r.Gorod, s.Gorod) {
 				result = append(result, r)
 				break
 			}
@@ -82,8 +87,8 @@ func extractStreets(records []rosseti.ShutdownRecord, settlements []Settlement) 
 	for _, r := range records {
 		for _, s := range settlements {
 			if r.Region == s.Region &&
-				strings.Contains(strings.ToLower(r.Raion), strings.ToLower(s.Raion)) &&
-				strings.Contains(strings.ToLower(r.Gorod), strings.ToLower(s.Gorod)) {
+				matchField(r.Raion, s.Raion) &&
+				matchField(r.Gorod, s.Gorod) {
 				key := s.Region + "|" + s.Raion + "|" + s.Gorod
 				if r.Street != "" {
 					seen[key][r.Street] = true
