@@ -23,6 +23,17 @@ type Settlement struct {
 	Gorod  string
 }
 
+type SettlementStreets struct {
+	Region  string   `json:"region"`
+	Raion   string   `json:"raion"`
+	Gorod   string   `json:"gorod"`
+	Streets []string `json:"streets"`
+}
+
+type StreetsPayload struct {
+	Settlements []SettlementStreets `json:"settlements"`
+}
+
 func parseSettlements(env string) ([]Settlement, error) {
 	parts := strings.Split(env, ";")
 	var result []Settlement
@@ -62,36 +73,91 @@ func filterBySettlements(records []rosseti.ShutdownRecord, settlements []Settlem
 	return result
 }
 
-func main() {
-	botURL := os.Getenv("BOT_SERVICE_URL")
-	if botURL == "" {
-		log.Fatal("BOT_SERVICE_URL is required")
+func extractStreets(records []rosseti.ShutdownRecord, settlements []Settlement) []SettlementStreets {
+	seen := make(map[string]map[string]bool)
+	for _, s := range settlements {
+		key := s.Region + "|" + s.Raion + "|" + s.Gorod
+		seen[key] = make(map[string]bool)
 	}
-	apiKey := os.Getenv("PARSER_API_KEY")
+	for _, r := range records {
+		for _, s := range settlements {
+			if r.Region == s.Region &&
+				strings.Contains(strings.ToLower(r.Raion), strings.ToLower(s.Raion)) &&
+				strings.Contains(strings.ToLower(r.Gorod), strings.ToLower(s.Gorod)) {
+				key := s.Region + "|" + s.Raion + "|" + s.Gorod
+				if r.Street != "" {
+					seen[key][r.Street] = true
+				}
+				break
+			}
+		}
+	}
+	var result []SettlementStreets
+	for _, s := range settlements {
+		key := s.Region + "|" + s.Raion + "|" + s.Gorod
+		streets := make([]string, 0, len(seen[key]))
+		for st := range seen[key] {
+			streets = append(streets, st)
+		}
+		result = append(result, SettlementStreets{
+			Region:  s.Region,
+			Raion:   s.Raion,
+			Gorod:   s.Gorod,
+			Streets: streets,
+		})
+	}
+	return result
+}
 
-	settlementsEnv := os.Getenv("PARSER_SETTLEMENTS")
-	if settlementsEnv == "" {
-		log.Fatal("PARSER_SETTLEMENTS is required (format: region,raion,gorod;region,raion,gorod)")
-	}
-	settlements, err := parseSettlements(settlementsEnv)
+func postJSON(url, apiKey string, payload any) error {
+	body, err := json.Marshal(payload)
 	if err != nil {
-		log.Fatalf("parse settlements: %v", err)
+		return fmt.Errorf("marshal: %w", err)
 	}
-
-	dbPath := os.Getenv("PARSER_DB_PATH")
-	if dbPath == "" {
-		dbPath = "outages.db"
-	}
-
-	botURL = strings.TrimRight(botURL, "/") + "/api/outages"
-
-	db, err := store.Init(dbPath)
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
 	if err != nil {
-		log.Fatalf("init db: %v", err)
+		return fmt.Errorf("create request: %w", err)
 	}
-	defer db.Close()
+	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("X-API-Key", apiKey)
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("send: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("bot returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	log.Printf("Bot response: %s", strings.TrimSpace(string(respBody)))
+	return nil
+}
 
-	log.Println("Fetching data from Rosseti API...")
+func runStreetsMode(botURL, apiKey string, settlements []Settlement) {
+	log.Println("Fetching data from Rosseti API for streets...")
+	records, err := rosseti.FetchData()
+	if err != nil {
+		log.Fatalf("fetch data: %v", err)
+	}
+	log.Printf("Fetched %d records total", len(records))
+
+	streets := extractStreets(records, settlements)
+	for _, s := range streets {
+		log.Printf("Settlement %s/%s/%s: %d streets", s.Region, s.Raion, s.Gorod, len(s.Streets))
+	}
+
+	payload := StreetsPayload{Settlements: streets}
+	if err := postJSON(botURL+"/api/streets", apiKey, payload); err != nil {
+		log.Fatalf("send streets: %v", err)
+	}
+	log.Println("Streets sent")
+}
+
+func runOutagesMode(botURL, apiKey string, settlements []Settlement, db *sql.DB) {
+	log.Println("Fetching data from Rosseti API for outages...")
 	records, err := rosseti.FetchData()
 	if err != nil {
 		log.Fatalf("fetch data: %v", err)
@@ -116,37 +182,49 @@ func main() {
 		return
 	}
 
-	payload := rosseti.OutagesPayload{Outages: unsent}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		log.Fatalf("marshal: %v", err)
-	}
-
-	req, err := http.NewRequest("POST", botURL, bytes.NewReader(body))
-	if err != nil {
-		log.Fatalf("create request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if apiKey != "" {
-		req.Header.Set("X-API-Key", apiKey)
-	}
-
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Fatalf("send to bot: %v", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		log.Fatalf("bot returned %d: %s", resp.StatusCode, string(respBody))
+	if err := postJSON(botURL+"/api/outages", apiKey, rosseti.OutagesPayload{Outages: unsent}); err != nil {
+		log.Fatalf("send outages: %v", err)
 	}
 
 	if err := store.MarkAllUnsentSent(db); err != nil {
 		log.Fatalf("mark sent: %v", err)
 	}
+}
 
-	log.Printf("Bot response: %s", strings.TrimSpace(string(respBody)))
+func main() {
+	botURL := os.Getenv("BOT_SERVICE_URL")
+	if botURL == "" {
+		log.Fatal("BOT_SERVICE_URL is required")
+	}
+	apiKey := os.Getenv("PARSER_API_KEY")
+
+	settlementsEnv := os.Getenv("PARSER_SETTLEMENTS")
+	if settlementsEnv == "" {
+		log.Fatal("PARSER_SETTLEMENTS is required (format: region,raion,gorod;region,raion,gorod)")
+	}
+	settlements, err := parseSettlements(settlementsEnv)
+	if err != nil {
+		log.Fatalf("parse settlements: %v", err)
+	}
+
+	botURL = strings.TrimRight(botURL, "/")
+
+	if len(os.Args) > 1 && os.Args[1] == "--streets" {
+		runStreetsMode(botURL, apiKey, settlements)
+		return
+	}
+
+	dbPath := os.Getenv("PARSER_DB_PATH")
+	if dbPath == "" {
+		dbPath = "outages.db"
+	}
+
+	db, err := store.Init(dbPath)
+	if err != nil {
+		log.Fatalf("init db: %v", err)
+	}
+	defer db.Close()
+
+	runOutagesMode(botURL, apiKey, settlements, db)
 	log.Println("Parser done")
 }
