@@ -109,6 +109,20 @@ func extractStreets(records []rosseti.ShutdownRecord, settlements []Settlement) 
 	return result
 }
 
+const httpTimeout = 90 * time.Second
+
+func wakeUpBot(baseURL string) {
+	log.Printf("Waking up bot at %s/health ...", baseURL)
+	client := &http.Client{Timeout: httpTimeout}
+	resp, err := client.Get(baseURL + "/health")
+	if err != nil {
+		log.Printf("wake-up failed (bot may already be awake): %v", err)
+		return
+	}
+	resp.Body.Close()
+	log.Println("Bot is awake")
+}
+
 func postJSON(url, apiKey string, payload any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -122,7 +136,7 @@ func postJSON(url, apiKey string, payload any) error {
 	if apiKey != "" {
 		req.Header.Set("X-API-Key", apiKey)
 	}
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{Timeout: httpTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("send: %w", err)
@@ -149,6 +163,7 @@ func runStreetsMode(botURL, apiKey string, settlements []Settlement) {
 		log.Printf("Settlement %s/%s/%s: %d streets", s.Region, s.Raion, s.Gorod, len(s.Streets))
 	}
 
+	wakeUpBot(botURL)
 	payload := StreetsPayload{Settlements: streets}
 	if err := postJSON(botURL+"/api/streets", apiKey, payload); err != nil {
 		log.Fatalf("send streets: %v", err)
@@ -182,6 +197,7 @@ func runOutagesMode(botURL, apiKey string, settlements []Settlement, db *sql.DB)
 		return
 	}
 
+	wakeUpBot(botURL)
 	if err := postJSON(botURL+"/api/outages", apiKey, rosseti.OutagesPayload{Outages: unsent}); err != nil {
 		log.Fatalf("send outages: %v", err)
 	}
